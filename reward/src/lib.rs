@@ -38,7 +38,7 @@ pub fn claim(options: Options) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!(Error::ArgMissing("No repo path specified".into())))?;
     let repo = match Repository::open(repo_path) {
         Ok(repo) => repo,
-        Err(e) => panic!("failed to open repo {}", e),
+        Err(e) => bail!("failed to open repo {}", e),
     };
 
     let mut commits: Vec<Oid> = Vec::new();
