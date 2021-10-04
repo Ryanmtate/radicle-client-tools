@@ -64,9 +64,12 @@ pub fn claim(options: Options) -> anyhow::Result<()> {
     let t = repo.find_note(Some(NOTES_REF), commits[index])?;
     log::debug!("Selected note: {:?}", t.id());
 
-    let t = t.message().unwrap();
+    let t = match t.message() {
+      Some(msg) => msg,
+      None => bail!("Not able to obtain commit message")
+    };
 
-    let msg: Proof = serde_json::from_str(t).unwrap();
+    let msg: Proof = serde_json::from_str(t)?;
 
     log::debug!("Retrieved Puzzle: {:?}", msg);
 
@@ -85,20 +88,25 @@ pub fn discover(options: Options) -> anyhow::Result<()> {
         Ok(repo) => repo,
         Err(e) => panic!("failed to open repo {}", e),
     };
-    let head = repo.head().unwrap();
-    let target = head.target().unwrap();
+    let head = repo.head()?;
+    let target = match head.target() {
+      Some(oid) => oid,
+      None => bail!("Not able to find HEAD")
+    };
 
-    let mut walk = repo.revwalk().unwrap();
-    walk.push(target).unwrap();
+    let mut walk = repo.revwalk()?;
+    walk.push(target)?;
 
     let oids: Vec<Oid> = walk
         .by_ref()
-        .filter(|s| {
-            let oid = s.as_ref().unwrap();
+        .filter(|r| -> bool {
+            let oid = r
+                .as_ref()
+                .map_err(|_| anyhow!(Error::CommitNotExisting))
+                .expect("Not able to map error");
             repo.find_note(Some(NOTES_REF), *oid).is_err()
         })
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
+        .collect::<Result<Vec<_>, _>>()?;
 
     println!("{}", "Commits without existing puzzles".bold());
     for oid in oids {
@@ -140,14 +148,21 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
     // -----------------------
     if let Some(keypath) = &options.keystore {
         let prompt = format!("{} Password: ", "??".cyan());
-        let password = rpassword::prompt_password_stdout(&prompt).unwrap();
+        let password = rpassword::prompt_password_stdout(&prompt)?;
         let signer = ethers::signers::LocalWallet::decrypt_keystore(keypath, password)
             .map_err(|_| anyhow!("keystore decryption failed"))?;
 
         let msg = create_puzzle(signer, contributor, commit.id().to_string(), project).await?;
 
         let repo_sig = repo.signature()?;
-        let note = repo.note(&repo_sig, &repo_sig, Some(NOTES_REF), commit.id(), &msg, true)?;
+        let note = repo.note(
+            &repo_sig,
+            &repo_sig,
+            Some(NOTES_REF),
+            commit.id(),
+            &msg,
+            true,
+        )?;
         log::debug!(
             "note id {}\ncreated on commit {}\nwith content {}",
             note,
@@ -163,7 +178,14 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
         let msg = create_puzzle(signer, contributor, commit.id().to_string(), project).await?;
 
         let repo_sig = repo.signature()?;
-        let note = repo.note(&repo_sig, &repo_sig, Some(NOTES_REF), commit.id(), &msg, true)?;
+        let note = repo.note(
+            &repo_sig,
+            &repo_sig,
+            Some(NOTES_REF),
+            commit.id(),
+            &msg,
+            true,
+        )?;
         log::debug!(
             "note id {}\ncreated on commit {}\nwith content {}",
             note,
@@ -194,7 +216,6 @@ async fn create_puzzle<S: Signer>(
     commit: String,
     project: String,
 ) -> anyhow::Result<String> {
-
     // Instantiate of puzzle
     let puzzle = Puzzle {
         org: signer.address(),
@@ -203,7 +224,7 @@ async fn create_puzzle<S: Signer>(
         project: project.to_owned(),
     };
 
-    // Signing of puzzle and creation of signature 
+    // Signing of puzzle and creation of signature
     let puzzle_json = serde_json::to_string(&puzzle)?;
     let sig = signer.sign_message(&puzzle_json).await;
     let sig = sig.map_err(|_| anyhow!(Error::SignFailure))?;
@@ -216,7 +237,8 @@ async fn create_puzzle<S: Signer>(
         commit,
         project,
         org_sig: sig.to_string(),
-    }).map_err(|_| anyhow!(Error::SerializeFailure))
+    })
+    .map_err(|_| anyhow!(Error::SerializeFailure))
 }
 
 #[derive(thiserror::Error, Debug)]
