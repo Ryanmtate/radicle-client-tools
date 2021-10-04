@@ -10,6 +10,8 @@ use ethers::{
 use git2::{Oid, Repository};
 use std::{fmt::Debug, path::PathBuf};
 
+const NOTES_REF: &str = "refs/notes/radicle/rewards";
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Puzzle {
     org: H160,
@@ -36,6 +38,7 @@ pub fn claim(options: Options) -> anyhow::Result<()> {
     let repo_path = options
         .repo
         .ok_or_else(|| anyhow!(Error::ArgMissing("No repo path specified".into())))?;
+
     let repo = match Repository::open(repo_path) {
         Ok(repo) => repo,
         Err(e) => bail!("failed to open repo {}", e),
@@ -43,7 +46,7 @@ pub fn claim(options: Options) -> anyhow::Result<()> {
 
     let mut commits: Vec<Oid> = Vec::new();
 
-    for note in repo.notes(None)? {
+    for note in repo.notes(Some(NOTES_REF))? {
         commits.push(note.unwrap().1);
     }
 
@@ -58,7 +61,7 @@ pub fn claim(options: Options) -> anyhow::Result<()> {
     };
     log::debug!("Selected commit: {:?}", commits[index]);
 
-    let t = repo.find_note(None, commits[index])?;
+    let t = repo.find_note(Some(NOTES_REF), commits[index])?;
     log::debug!("Selected note: {:?}", t.id());
 
     let t = t.message().unwrap();
@@ -92,7 +95,7 @@ pub fn discover(options: Options) -> anyhow::Result<()> {
         .by_ref()
         .filter(|s| {
             let oid = s.as_ref().unwrap();
-            repo.find_note(None, *oid).is_err()
+            repo.find_note(Some(NOTES_REF), *oid).is_err()
         })
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -144,7 +147,7 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
         let msg = create_puzzle(signer, contributor, commit.id().to_string(), project).await?;
 
         let repo_sig = repo.signature()?;
-        let note = repo.note(&repo_sig, &repo_sig, None, commit.id(), &msg, true)?;
+        let note = repo.note(&repo_sig, &repo_sig, Some(NOTES_REF), commit.id(), &msg, true)?;
         log::debug!(
             "note id {}\ncreated on commit {}\nwith content {}",
             note,
@@ -160,7 +163,7 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
         let msg = create_puzzle(signer, contributor, commit.id().to_string(), project).await?;
 
         let repo_sig = repo.signature()?;
-        let note = repo.note(&repo_sig, &repo_sig, None, commit.id(), &msg, true)?;
+        let note = repo.note(&repo_sig, &repo_sig, Some(NOTES_REF), commit.id(), &msg, true)?;
         log::debug!(
             "note id {}\ncreated on commit {}\nwith content {}",
             note,
