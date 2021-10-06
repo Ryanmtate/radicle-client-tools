@@ -1,14 +1,18 @@
 use anyhow::{anyhow, bail};
-use coins_bip32::path::DerivationPath;
+use coins_bip32::{path::DerivationPath, prelude::SigningKey};
 use colored::*;
 use console::Term;
 use dialoguer::{theme::ColorfulTheme, Select};
 use ethers::{
+    prelude::Wallet,
     signers::{HDPath, Ledger, Signer},
-    types::H160,
+    types::{H160, U256},
 };
 use git2::{Oid, Repository};
-use std::{fmt::Debug, path::PathBuf};
+use std::{
+    fmt::Debug,
+    path::{Path, PathBuf},
+};
 
 const NOTES_REF: &str = "refs/notes/radicle/rewards";
 
@@ -26,7 +30,9 @@ pub struct Proof {
     contributor: H160,
     commit: String,
     project: String,
-    org_sig: String,
+    v: u64,
+    r: U256,
+    s: U256,
 }
 
 /// Retrieves all notes from repo.
@@ -65,8 +71,8 @@ pub fn claim(options: Options) -> anyhow::Result<()> {
     log::debug!("Selected note: {:?}", t.id());
 
     let t = match t.message() {
-      Some(msg) => msg,
-      None => bail!("Not able to obtain commit message")
+        Some(msg) => msg,
+        None => bail!("Not able to obtain commit message"),
     };
 
     let msg: Proof = serde_json::from_str(t)?;
@@ -90,8 +96,8 @@ pub fn discover(options: Options) -> anyhow::Result<()> {
     };
     let head = repo.head()?;
     let target = match head.target() {
-      Some(oid) => oid,
-      None => bail!("Not able to find HEAD")
+        Some(oid) => oid,
+        None => bail!("Not able to find HEAD"),
     };
 
     let mut walk = repo.revwalk()?;
@@ -121,8 +127,7 @@ pub fn discover(options: Options) -> anyhow::Result<()> {
 /// The message is getting signed with a Ledger HW or a keystore file.
 /// And stored as a git note on the specified commit
 pub async fn create(options: Options) -> anyhow::Result<()> {
-    // Creating message
-    // -------------------
+    let msg;
     let oid = options
         .commit
         .ok_or_else(|| anyhow!(Error::ArgMissing("No commit specified".into())))?;
@@ -144,62 +149,35 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
         .find_commit(oid)
         .map_err(|_| anyhow!(Error::CommitNotExisting))?;
 
-    // Sign message
-    // -----------------------
     if let Some(keypath) = &options.keystore {
-        let prompt = format!("{} Password: ", "??".cyan());
-        let password = rpassword::prompt_password_stdout(&prompt)?;
-        let signer = ethers::signers::LocalWallet::decrypt_keystore(keypath, password)
-            .map_err(|_| anyhow!("keystore decryption failed"))?;
-
-        let msg = create_puzzle(signer, contributor, commit.id().to_string(), project).await?;
-
-        let repo_sig = repo.signature()?;
-        let note = repo.note(
-            &repo_sig,
-            &repo_sig,
-            Some(NOTES_REF),
-            commit.id(),
-            &msg,
-            true,
-        )?;
-        log::debug!(
-            "note id {}\ncreated on commit {}\nwith content {}",
-            note,
-            commit.id(),
-            &msg
-        );
-
-        Ok(())
+        let signer = get_keystore(&keypath)?;
+        msg = create_puzzle(signer, contributor, commit.id().to_string(), project).await?;
     } else if let Some(path) = &options.ledger_hdpath {
-        let hdpath = path.derivation_string();
-        let signer = Ledger::new(HDPath::Other(hdpath), 1).await?;
-
-        let msg = create_puzzle(signer, contributor, commit.id().to_string(), project).await?;
-
-        let repo_sig = repo.signature()?;
-        let note = repo.note(
-            &repo_sig,
-            &repo_sig,
-            Some(NOTES_REF),
-            commit.id(),
-            &msg,
-            true,
-        )?;
-        log::debug!(
-            "note id {}\ncreated on commit {}\nwith content {}",
-            note,
-            commit.id(),
-            &msg
-        );
-
-        Ok(())
+        let signer = get_ledger(&path).await?;
+        msg = create_puzzle(signer, contributor, commit.id().to_string(), project).await?;
     } else {
-        Err(anyhow!(Error::ArgMissing(
+        return Err(anyhow!(Error::ArgMissing(
             "no wallet specified: either '--ledger-hdpath' or '--keystore' must be specified"
                 .into()
-        )))
+        )));
     }
+
+    let repo_sig = repo.signature()?;
+    let note = repo.note(
+        &repo_sig,
+        &repo_sig,
+        Some(NOTES_REF),
+        commit.id(),
+        &msg,
+        true,
+    )?;
+    log::debug!(
+        "note id {}\ncreated on commit {}\nwith content {}",
+        note,
+        commit.id(),
+        &msg
+    );
+    Ok(())
 }
 
 fn format_commit(repo: &Repository, oid: &Oid) -> anyhow::Result<(String, String)> {
@@ -208,6 +186,22 @@ fn format_commit(repo: &Repository, oid: &Oid) -> anyhow::Result<(String, String
         .summary()
         .ok_or_else(|| anyhow!(Error::NotValidEncoding("commit summary".into())))?;
     Ok((oid.to_string()[..7].into(), summary.into()))
+}
+
+fn get_keystore(keystore: &Path) -> anyhow::Result<Wallet<SigningKey>> {
+    let prompt = format!("{} Password: ", "??".cyan());
+    let password = rpassword::prompt_password_stdout(&prompt)?;
+    let signer = ethers::signers::LocalWallet::decrypt_keystore(keystore, password)
+        .map_err(|_| anyhow!("keystore decryption failed"))?;
+
+    Ok(signer)
+}
+
+async fn get_ledger(path: &DerivationPath) -> anyhow::Result<Ledger> {
+    let hdpath = path.derivation_string();
+    let signer = Ledger::new(HDPath::Other(hdpath), 1).await?;
+
+    Ok(signer)
 }
 
 async fn create_puzzle<S: Signer>(
@@ -236,7 +230,9 @@ async fn create_puzzle<S: Signer>(
         contributor,
         commit,
         project,
-        org_sig: sig.to_string(),
+        v: sig.v,
+        r: sig.r,
+        s: sig.s,
     })
     .map_err(|_| anyhow!(Error::SerializeFailure))
 }
