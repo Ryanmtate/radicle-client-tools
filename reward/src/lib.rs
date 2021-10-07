@@ -6,28 +6,29 @@ use dialoguer::{theme::ColorfulTheme, Select};
 use ethers::{
     prelude::Wallet,
     signers::{HDPath, Ledger, Signer},
-    types::{H160, U256},
+    types::{Address, U256},
 };
 use git2::{Oid, Repository};
 use std::{
     fmt::Debug,
     path::{Path, PathBuf},
 };
+use zbase32::decode_full_bytes_str;
 
 const NOTES_REF: &str = "refs/notes/radicle/rewards";
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Puzzle {
-    org: H160,
-    contributor: H160,
+    org: Address,
+    contributor: Address,
     commit: String,
     project: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Proof {
-    org: H160,
-    contributor: H160,
+    org: Address,
+    contributor: Address,
     commit: String,
     project: String,
     v: u64,
@@ -76,7 +77,6 @@ pub fn claim(options: Options) -> anyhow::Result<()> {
     };
 
     let msg: Proof = serde_json::from_str(t)?;
-
     log::debug!("Retrieved Puzzle: {:?}", msg);
 
     Ok(())
@@ -134,6 +134,9 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
     let contributor = options
         .contributor
         .ok_or_else(|| anyhow!(Error::ArgMissing("No contributor address specified".into())))?;
+    let org = options
+        .org
+        .ok_or_else(|| anyhow!(Error::ArgMissing("No org address specified".into())))?;
     let project = options
         .project
         .ok_or_else(|| anyhow!(Error::ArgMissing("No project id specified".into())))?;
@@ -151,10 +154,10 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
 
     if let Some(keypath) = &options.keystore {
         let signer = get_keystore(&keypath)?;
-        msg = create_puzzle(signer, contributor, commit.id().to_string(), project).await?;
+        msg = create_puzzle(signer, org, contributor, commit.id().to_string(), project).await?;
     } else if let Some(path) = &options.ledger_hdpath {
         let signer = get_ledger(&path).await?;
-        msg = create_puzzle(signer, contributor, commit.id().to_string(), project).await?;
+        msg = create_puzzle(signer, org, contributor, commit.id().to_string(), project).await?;
     } else {
         return Err(anyhow!(Error::ArgMissing(
             "no wallet specified: either '--ledger-hdpath' or '--keystore' must be specified"
@@ -206,13 +209,20 @@ async fn get_ledger(path: &DerivationPath) -> anyhow::Result<Ledger> {
 
 async fn create_puzzle<S: Signer>(
     signer: S,
-    contributor: H160,
+    org: Address,
+    contributor: Address,
     commit: String,
     project: String,
 ) -> anyhow::Result<String> {
+    let commit = format!("0x{:0<32}", commit);
+    let project = format!(
+        "0x{:0<32}",
+        hex::encode(decode_full_bytes_str(&project).unwrap())
+    );
+
     // Instantiate of puzzle
     let puzzle = Puzzle {
-        org: signer.address(),
+        org,
         contributor,
         commit: commit.to_owned(),
         project: project.to_owned(),
@@ -226,7 +236,7 @@ async fn create_puzzle<S: Signer>(
 
     // Creation of proof json
     serde_json::to_string(&Proof {
-        org: signer.address(),
+        org,
         contributor,
         commit,
         project,
@@ -272,9 +282,9 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Address of org.
-    pub org: Option<H160>,
+    pub org: Option<Address>,
     /// Address of contributor
-    pub contributor: Option<H160>,
+    pub contributor: Option<Address>,
     /// Repo path
     pub repo: Option<PathBuf>,
     /// Project id.
