@@ -41,7 +41,7 @@ pub struct Proof {
 /// Obtains the proof stored in the commit
 /// Creates the transaction object, signs it by the contributor
 /// And sends it to the NFT factory
-pub fn claim(options: Options) -> anyhow::Result<()> {
+pub async fn claim(options: Options) -> anyhow::Result<()> {
     let repo_path = options
         .repo
         .ok_or_else(|| anyhow!(Error::ArgMissing("No repo path specified".into())))?;
@@ -51,10 +51,31 @@ pub fn claim(options: Options) -> anyhow::Result<()> {
         Err(e) => bail!("failed to open repo {}", e),
     };
 
+    let signer_address;
+
+    if let Some(keypath) = &options.keystore {
+        let signer = get_keystore(&keypath)?;
+        signer_address = signer.address();
+    } else if let Some(path) = &options.ledger_hdpath {
+        let signer = get_ledger(&path).await?;
+        signer_address = signer.address();
+    } else {
+        return Err(anyhow!(Error::ArgMissing(
+            "no wallet specified: either '--ledger-hdpath' or '--keystore' must be specified"
+                .into()
+        )));
+    }
+
     let mut commits: Vec<Oid> = Vec::new();
 
     for note in repo.notes(Some(NOTES_REF))? {
-        commits.push(note.unwrap().1);
+        let oids = note?;
+        let note = repo.find_note(Some(NOTES_REF), oids.1)?;
+        let message = note.message().unwrap();
+        let t: Puzzle = serde_json::from_str(message)?;
+        if signer_address == t.contributor {
+            commits.push(oids.1);
+        }
     }
 
     let selection = Select::with_theme(&ColorfulTheme::default())

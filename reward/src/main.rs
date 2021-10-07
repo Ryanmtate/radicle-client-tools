@@ -134,7 +134,7 @@ async fn execute() -> anyhow::Result<()> {
         }
         Command::Claim { options, verbose } => {
             set_debug_level(verbose);
-            claim(options)?;
+            claim(options).await?;
             Ok(())
         }
         Command::Create { options, verbose } => {
