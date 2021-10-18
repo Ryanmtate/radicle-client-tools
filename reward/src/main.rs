@@ -27,6 +27,7 @@ fn parse_options() -> anyhow::Result<Command> {
     let mut ledger_hdpath: Option<DerivationPath> = None;
     let mut keystore: Option<PathBuf> = None;
     let mut commit: Option<Oid> = None;
+    let mut rpc_url: Option<String> = None;
     let mut verbose = false;
 
     while let Some(arg) = parser.next()? {
@@ -41,6 +42,7 @@ fn parse_options() -> anyhow::Result<Command> {
                         ledger_hdpath,
                         keystore,
                         commit,
+                        rpc_url,
                     },
                     verbose,
                 });
@@ -55,6 +57,7 @@ fn parse_options() -> anyhow::Result<Command> {
                         ledger_hdpath: None,
                         keystore: None,
                         commit: None,
+                        rpc_url: None,
                     },
                     verbose,
                 })
@@ -69,6 +72,7 @@ fn parse_options() -> anyhow::Result<Command> {
                         ledger_hdpath,
                         keystore,
                         commit,
+                        rpc_url,
                     },
                     verbose,
                 })
@@ -93,6 +97,9 @@ fn parse_options() -> anyhow::Result<Command> {
             }
             Long("ledger-hdpath") => {
                 ledger_hdpath = Some(parser.value()?.parse()?);
+            }
+            Long("rpc-url") => {
+                rpc_url = Some(parser.value()?.parse()?);
             }
             Long("verbose") | Short('v') => {
                 verbose = true;
