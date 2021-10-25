@@ -3,15 +3,15 @@ use coins_bip32::{path::DerivationPath, prelude::SigningKey};
 use colored::*;
 use console::Term;
 use dialoguer::{theme::ColorfulTheme, Select};
+use ethers::core as ethers_core;
 use ethers::{
     abi::Abi,
-    contract::{Contract, EthAbiType},
+    contract::*,
     prelude::{SignerMiddleware, Wallet},
     providers::{Http, Provider},
     signers::{HDPath, Ledger, Signer},
     types::{transaction::eip712::Eip712, Address, H256},
 };
-use ethers_derive_eip712::*;
 use git2::{Oid, Repository};
 use std::{
     convert::TryFrom,
@@ -22,6 +22,7 @@ use zbase32::decode_full_bytes_str;
 
 const NOTES_REF: &str = "refs/notes/radicle/rewards";
 const REWARD_ABI: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/abis/RewardV1.json"));
+const REWARD_CONTRACT: &str = "0xb92557a73f997c74ef6bc2acd63501a281b4d888";
 
 /// Puzzle struct
 ///
@@ -32,7 +33,7 @@ const REWARD_ABI: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/abis
     name = "Radicle",
     version = "1",
     chain_id = 4,
-    verifying_contract = "0x6Fb1CFACD289Da5e8d2f786EfbF8560a948bF306"
+    verifying_contract = "0xb92557a73f997c74ef6bc2acd63501a281b4d888"
 )]
 pub struct Puzzle {
     org: Address,
@@ -91,9 +92,6 @@ pub async fn claim_with_keystore(
     let signer = get_keystore(&keypath)?;
     let mut commits: Vec<Oid> = Vec::new();
 
-    let reward_contract = "0x6Fb1CFACD289Da5e8d2f786EfbF8560a948bF306"
-        .parse::<Address>()
-        .unwrap();
     for note in repo.notes(Some(NOTES_REF))? {
         let oids = note?;
         log::debug!("Note: {:?}, Commit: {:?}", oids.0, oids.1);
@@ -141,9 +139,11 @@ pub async fn claim_with_keystore(
 
     let signer = SignerMiddleware::new(provider, signer);
     let abi: Abi = serde_json::from_str(REWARD_ABI)?;
-    let contract = Contract::new(reward_contract, abi, signer);
+    let contract = Contract::new(REWARD_CONTRACT.parse::<Address>().unwrap(), abi, signer);
 
-    let call = contract.method::<_, bool>("claimRewardEOA", (puzzle, msg.v, msg.r, msg.s))?;
+    let call = contract
+        .method::<_, bool>("claimRewardEOA", (puzzle, msg.v, msg.r, msg.s))?
+        .legacy();
 
     // let estimate = call.estimate_gas().await?;
     // log::info!("Estimate Gas: {}", estimate);
@@ -164,7 +164,7 @@ pub async fn claim_with_keystore(
     };
 
     log::info!(
-        "Project successfully anchored in block #{} ({})",
+        "Reward successfully minted in block #{} ({})",
         result.block_number.unwrap(),
         result.block_hash.unwrap(),
     );
@@ -175,7 +175,7 @@ pub async fn claim_with_keystore(
 pub async fn claim_with_ledger(
     path: &DerivationPath,
     repo: Repository,
-    provider: Provider<Http>,
+    _provider: Provider<Http>,
 ) -> anyhow::Result<()> {
     let signer = get_ledger(&path).await?;
     let mut commits: Vec<Oid> = Vec::new();
@@ -287,10 +287,10 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
 
     if let Some(keypath) = &options.keystore {
         let signer = get_keystore(&keypath)?;
-        msg = create_puzzle(signer, org, contributor, commit.id().to_string(), project).await?;
+        msg = create_puzzle(signer, org, contributor, commit.id().to_string(), &project).await?;
     } else if let Some(path) = &options.ledger_hdpath {
         let signer = get_ledger(&path).await?;
-        msg = create_puzzle(signer, org, contributor, commit.id().to_string(), project).await?;
+        msg = create_puzzle(signer, org, contributor, commit.id().to_string(), &project).await?;
     } else {
         return Err(anyhow!(Error::ArgMissing(
             "no wallet specified: either '--ledger-hdpath' or '--keystore' must be specified"
@@ -307,12 +307,19 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
         &msg,
         true,
     )?;
+
+    log::debug!("note id {}\ncreated on commit {}", note, commit.id());
+
+    let msg: Proof = serde_json::from_str(&msg)?;
+
     log::debug!(
-        "note id {}\ncreated on commit {}\nwith content {}",
-        note,
-        commit.id(),
-        &msg
+        "[\"{:?}\",\"{:?}\",{:?},{:?}]",
+        &msg.org,
+        &msg.contributor,
+        hex::encode(&msg.commit),
+        hex::encode(&msg.project),
     );
+    log::debug!("v: {}\nr: {}\ns: {}", &msg.v, hex::encode(&msg.r), hex::encode(&msg.s));
     Ok(())
 }
 
@@ -330,7 +337,6 @@ fn get_keystore(keystore: &Path) -> anyhow::Result<Wallet<SigningKey>> {
     let signer = ethers::signers::LocalWallet::decrypt_keystore(keystore, password)
         .map_err(|_| anyhow!("keystore decryption failed"))?
         .with_chain_id(4u64);
-
     Ok(signer)
 }
 
@@ -346,7 +352,7 @@ async fn create_puzzle<S: Signer>(
     org: Address,
     contributor: Address,
     commit: String,
-    project: String,
+    project: &String,
 ) -> anyhow::Result<String> {
     let mut p = decode_full_bytes_str(&project).unwrap();
     p.resize(32, 0);
@@ -365,9 +371,9 @@ async fn create_puzzle<S: Signer>(
     };
 
     let sig = signer
-        .sign_typed_data(puzzle)
+        .sign_typed_data(&puzzle)
         .await
-        .map_err(|e| anyhow!(Error::SignFailure))?;
+        .map_err(|_| anyhow!(Error::SignFailure))?;
 
     let r = <[u8; 32]>::try_from(sig.r)
         .expect("failed to parse 'r' value from signature into [u8; 32]");
