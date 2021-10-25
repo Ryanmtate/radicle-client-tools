@@ -22,7 +22,7 @@ use zbase32::decode_full_bytes_str;
 
 const NOTES_REF: &str = "refs/notes/radicle/rewards";
 const REWARD_ABI: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/abis/RewardV1.json"));
-const REWARD_CONTRACT: &str = "0xb92557a73f997c74ef6bc2acd63501a281b4d888";
+const REWARD_CONTRACT: &str = "0xbF335734D1B8d6524935dcD3F5779208deAbEabD";
 
 /// Puzzle struct
 ///
@@ -33,7 +33,7 @@ const REWARD_CONTRACT: &str = "0xb92557a73f997c74ef6bc2acd63501a281b4d888";
     name = "Radicle",
     version = "1",
     chain_id = 4,
-    verifying_contract = "0xb92557a73f997c74ef6bc2acd63501a281b4d888"
+    verifying_contract = "0xbF335734D1B8d6524935dcD3F5779208deAbEabD"
 )]
 pub struct Puzzle {
     org: Address,
