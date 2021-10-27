@@ -71,9 +71,9 @@ pub async fn claim(options: Options) -> anyhow::Result<()> {
         Provider::<Http>::try_from(rpc_url).expect("could not instantiate HTTP Provider");
 
     if let Some(keypath) = &options.keystore {
-        claim_with_keystore(&keypath, repo, provider).await?;
+        claim_with_keystore(keypath, repo, provider).await?;
     } else if let Some(path) = &options.ledger_hdpath {
-        claim_with_ledger(&path, repo, provider).await?;
+        claim_with_ledger(path, repo, provider).await?;
     } else {
         return Err(anyhow!(Error::ArgMissing(
             "no wallet specified: either '--ledger-hdpath' or '--keystore' must be specified"
@@ -85,11 +85,11 @@ pub async fn claim(options: Options) -> anyhow::Result<()> {
 }
 
 pub async fn claim_with_keystore(
-    keypath: &PathBuf,
+    keypath: &Path,
     repo: Repository,
     provider: Provider<Http>,
 ) -> anyhow::Result<()> {
-    let signer = get_keystore(&keypath)?;
+    let signer = get_keystore(keypath)?;
     let mut commits: Vec<Oid> = Vec::new();
 
     for note in repo.notes(Some(NOTES_REF))? {
@@ -177,7 +177,7 @@ pub async fn claim_with_ledger(
     repo: Repository,
     _provider: Provider<Http>,
 ) -> anyhow::Result<()> {
-    let signer = get_ledger(&path).await?;
+    let signer = get_ledger(path).await?;
     let mut commits: Vec<Oid> = Vec::new();
 
     for note in repo.notes(Some(NOTES_REF))? {
@@ -286,10 +286,10 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
         .map_err(|_| anyhow!(Error::CommitNotExisting))?;
 
     if let Some(keypath) = &options.keystore {
-        let signer = get_keystore(&keypath)?;
+        let signer = get_keystore(keypath)?;
         msg = create_puzzle(signer, org, contributor, commit.id().to_string(), &project).await?;
     } else if let Some(path) = &options.ledger_hdpath {
-        let signer = get_ledger(&path).await?;
+        let signer = get_ledger(path).await?;
         msg = create_puzzle(signer, org, contributor, commit.id().to_string(), &project).await?;
     } else {
         return Err(anyhow!(Error::ArgMissing(
@@ -352,15 +352,15 @@ async fn create_puzzle<S: Signer>(
     org: Address,
     contributor: Address,
     commit: String,
-    project: &String,
+    project: &str,
 ) -> anyhow::Result<String> {
-    let mut p = decode_full_bytes_str(&project).unwrap();
-    p.resize(32, 0);
-    let project = H256::from_slice(&p);
+    let mut project_vec = decode_full_bytes_str(project).unwrap();
+    project_vec.resize(32, 0);
+    let project = H256::from_slice(&project_vec);
 
-    let mut c = hex::decode(commit)?;
-    c.resize(32, 0);
-    let commit = H256::from_slice(&c);
+    let mut commit_vec = hex::decode(commit)?;
+    commit_vec.resize(32, 0);
+    let commit = H256::from_slice(&commit_vec);
 
     // Instantiate of puzzle
     let puzzle = Puzzle {
