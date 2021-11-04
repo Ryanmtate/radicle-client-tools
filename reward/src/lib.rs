@@ -6,7 +6,7 @@ use dialoguer::{theme::ColorfulTheme, Select};
 use ethers::core as ethers_core;
 use ethers::{
     abi::Abi,
-    contract::*,
+    contract::{Contract, Eip712, EthAbiType},
     prelude::{SignerMiddleware, Wallet},
     providers::{Http, Provider},
     signers::{HDPath, Ledger, Signer},
@@ -22,7 +22,7 @@ use zbase32::decode_full_bytes_str;
 
 const NOTES_REF: &str = "refs/notes/radicle/rewards";
 const REWARD_ABI: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/abis/RewardV1.json"));
-const REWARD_CONTRACT: &str = "0xbF335734D1B8d6524935dcD3F5779208deAbEabD";
+const REWARD_CONTRACT: &str = "0xa6b2337A4e5122Bad631bb6CAbDBB9aa12bb41F6";
 
 /// Puzzle struct
 ///
@@ -33,13 +33,14 @@ const REWARD_CONTRACT: &str = "0xbF335734D1B8d6524935dcD3F5779208deAbEabD";
     name = "Radicle",
     version = "1",
     chain_id = 4,
-    verifying_contract = "0xbF335734D1B8d6524935dcD3F5779208deAbEabD"
+    verifying_contract = "0xa6b2337A4e5122Bad631bb6CAbDBB9aa12bb41F6"
 )]
 pub struct Puzzle {
     org: Address,
     contributor: Address,
     commit: [u8; 32],
     project: [u8; 32],
+    uri: String,
 }
 
 /// Proof, a struct defining the data structure that gets stored in the git notes,
@@ -50,6 +51,7 @@ pub struct Proof {
     contributor: Address,
     commit: [u8; 32],
     project: [u8; 32],
+    uri: String,
     v: u8,
     r: [u8; 32],
     s: [u8; 32],
@@ -90,65 +92,19 @@ pub async fn claim_with_keystore(
     provider: Provider<Http>,
 ) -> anyhow::Result<()> {
     let signer = get_keystore(keypath)?;
-    let mut commits: Vec<Oid> = Vec::new();
 
-    for note in repo.notes(Some(NOTES_REF))? {
-        let oids = note?;
-        log::debug!("Note: {:?}, Commit: {:?}", oids.0, oids.1);
-        let note = repo.find_note(Some(NOTES_REF), oids.1)?;
-        log::debug!("Note: {:?}", note);
-        let message = note.message().unwrap();
-        log::debug!("Message: {:?}", message);
+    let commits = get_eligible_commits(signer.address(), &repo)?;
+    let selected_commit = select_commit(&commits)?;
+    log::debug!("Selected commit: {:?}", selected_commit);
 
-        let t: Proof = serde_json::from_str(message)?;
-        if signer.address() == t.contributor {
-            commits.push(oids.1);
-        }
-    }
-
-    let selection = Select::with_theme(&ColorfulTheme::default())
-        .items(&commits)
-        .with_prompt("Claimable Commits")
-        .interact_on_opt(&Term::stderr())?;
-
-    let index = match selection {
-        Some(index) => index,
-        None => bail!("User did not select any commit"),
-    };
-    log::debug!("Selected commit: {:?}", commits[index]);
-
-    let t = repo.find_note(Some(NOTES_REF), commits[index])?;
-    log::debug!("Selected note: {:?}", t.id());
-
-    let t = match t.message() {
-        Some(msg) => msg,
-        None => bail!("Not able to obtain commit message"),
-    };
-
-    let msg: Proof = serde_json::from_str(t)?;
-    log::debug!("Retrieved Proof: {:?}", msg);
-
-    let puzzle = Puzzle {
-        org: msg.org,
-        contributor: msg.contributor,
-        commit: msg.commit,
-        project: msg.project,
-    };
-
+    let (puzzle, proof) = create_structs(&repo, &selected_commit)?;
     log::debug!("Parsed Puzzle: {:?}", puzzle);
 
     let signer = SignerMiddleware::new(provider, signer);
     let abi: Abi = serde_json::from_str(REWARD_ABI)?;
     let contract = Contract::new(REWARD_CONTRACT.parse::<Address>().unwrap(), abi, signer);
 
-    let call = contract
-        .method::<_, bool>("claimRewardEOA", (puzzle, msg.v, msg.r, msg.s))?
-        .legacy();
-
-    // let estimate = call.estimate_gas().await?;
-    // log::info!("Estimate Gas: {}", estimate);
-
-    let call = call.gas(500000);
+    let call = contract.method::<_, bool>("claimRewardEOA", (puzzle, proof.v, proof.r, proof.s))?;
 
     let result = loop {
         let pending = call.send().await?;
@@ -175,42 +131,40 @@ pub async fn claim_with_keystore(
 pub async fn claim_with_ledger(
     path: &DerivationPath,
     repo: Repository,
-    _provider: Provider<Http>,
+    provider: Provider<Http>,
 ) -> anyhow::Result<()> {
     let signer = get_ledger(path).await?;
-    let mut commits: Vec<Oid> = Vec::new();
+    let commits = get_eligible_commits(signer.address(), &repo)?;
+    let selected_commit = select_commit(&commits)?;
+    log::debug!("Selected commit: {:?}", selected_commit);
 
-    for note in repo.notes(Some(NOTES_REF))? {
-        let oids = note?;
-        let note = repo.find_note(Some(NOTES_REF), oids.1)?;
-        let message = note.message().unwrap();
-        let t: Proof = serde_json::from_str(message)?;
-        if signer.address() == t.contributor {
-            commits.push(oids.1);
+    let (puzzle, proof) = create_structs(&repo, &selected_commit)?;
+    log::debug!("Parsed Puzzle: {:?}", puzzle);
+
+    let signer = SignerMiddleware::new(provider, signer);
+    let abi: Abi = serde_json::from_str(REWARD_ABI)?;
+    let contract = Contract::new(REWARD_CONTRACT.parse::<Address>().unwrap(), abi, signer);
+
+    let call = contract.method::<_, bool>("claimRewardEOA", (puzzle, proof.v, proof.r, proof.s))?;
+
+    let result = loop {
+        let pending = call.send().await?;
+        let tx_hash = *pending;
+
+        log::info!("Waiting for transaction {:?} to be included..", tx_hash);
+
+        if let Some(result) = pending.await? {
+            break result;
+        } else {
+            log::info!("Transaction {} dropped, retrying..", tx_hash);
         }
-    }
-
-    let selection = Select::with_theme(&ColorfulTheme::default())
-        .items(&commits)
-        .with_prompt("Claimable Commits")
-        .interact_on_opt(&Term::stderr())?;
-
-    let index = match selection {
-        Some(index) => index,
-        None => bail!("User did not select any commit"),
-    };
-    log::debug!("Selected commit: {:?}", commits[index]);
-
-    let t = repo.find_note(Some(NOTES_REF), commits[index])?;
-    log::debug!("Selected note: {:?}", t.id());
-
-    let t = match t.message() {
-        Some(msg) => msg,
-        None => bail!("Not able to obtain commit message"),
     };
 
-    let msg: Proof = serde_json::from_str(t)?;
-    log::debug!("Retrieved Puzzle: {:?}", msg);
+    log::info!(
+        "Reward successfully minted in block #{} ({})",
+        result.block_number.unwrap(),
+        result.block_hash.unwrap(),
+    );
 
     Ok(())
 }
@@ -264,6 +218,9 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
     let oid = options
         .commit
         .ok_or_else(|| anyhow!(Error::ArgMissing("No commit specified".into())))?;
+    let token_uri = options
+        .token_uri
+        .ok_or_else(|| anyhow!(Error::ArgMissing("No token URI specified".into())))?;
     let contributor = options
         .contributor
         .ok_or_else(|| anyhow!(Error::ArgMissing("No contributor address specified".into())))?;
@@ -287,10 +244,26 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
 
     if let Some(keypath) = &options.keystore {
         let signer = get_keystore(keypath)?;
-        msg = create_puzzle(signer, org, contributor, commit.id().to_string(), &project).await?;
+        msg = create_puzzle(
+            signer,
+            org,
+            contributor,
+            commit.id().to_string(),
+            &project,
+            &token_uri,
+        )
+        .await?;
     } else if let Some(path) = &options.ledger_hdpath {
         let signer = get_ledger(path).await?;
-        msg = create_puzzle(signer, org, contributor, commit.id().to_string(), &project).await?;
+        msg = create_puzzle(
+            signer,
+            org,
+            contributor,
+            commit.id().to_string(),
+            &project,
+            &token_uri,
+        )
+        .await?;
     } else {
         return Err(anyhow!(Error::ArgMissing(
             "no wallet specified: either '--ledger-hdpath' or '--keystore' must be specified"
@@ -299,7 +272,7 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
     }
 
     let repo_sig = repo.signature()?;
-    let note = repo.note(
+    repo.note(
         &repo_sig,
         &repo_sig,
         Some(NOTES_REF),
@@ -308,18 +281,8 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
         true,
     )?;
 
-    log::debug!("note id {}\ncreated on commit {}", note, commit.id());
+    log::info!("Proof successfully created and stored on {:?}", commit.id());
 
-    let msg: Proof = serde_json::from_str(&msg)?;
-
-    log::debug!(
-        "[\"{:?}\",\"{:?}\",{:?},{:?}]",
-        &msg.org,
-        &msg.contributor,
-        hex::encode(&msg.commit),
-        hex::encode(&msg.project),
-    );
-    log::debug!("v: {}\nr: {}\ns: {}", &msg.v, hex::encode(&msg.r), hex::encode(&msg.s));
     Ok(())
 }
 
@@ -353,14 +316,13 @@ async fn create_puzzle<S: Signer>(
     contributor: Address,
     commit: String,
     project: &str,
+    uri: &str,
 ) -> anyhow::Result<String> {
     let mut project_vec = decode_full_bytes_str(project).unwrap();
     project_vec.resize(32, 0);
     let project = H256::from_slice(&project_vec);
 
-    let mut commit_vec = hex::decode(commit)?;
-    commit_vec.resize(32, 0);
-    let commit = H256::from_slice(&commit_vec);
+    let commit = convert_hex_to_fixed_bytes32(commit)?;
 
     // Instantiate of puzzle
     let puzzle = Puzzle {
@@ -368,6 +330,7 @@ async fn create_puzzle<S: Signer>(
         contributor,
         commit: commit.to_fixed_bytes(),
         project: project.to_fixed_bytes(),
+        uri: uri.to_string(),
     };
 
     let sig = signer
@@ -387,11 +350,18 @@ async fn create_puzzle<S: Signer>(
         contributor,
         commit: commit.to_fixed_bytes(),
         project: project.to_fixed_bytes(),
+        uri: uri.to_string(),
         v,
         r,
         s,
     })
     .map_err(|_| anyhow!(Error::SerializeFailure))
+}
+
+fn convert_hex_to_fixed_bytes32(input: String) -> anyhow::Result<H256> {
+    let mut vec = hex::decode(input)?;
+    vec.resize(32, 0);
+    Ok(H256::from_slice(&vec))
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -442,6 +412,61 @@ pub struct Options {
     pub keystore: Option<PathBuf>,
     /// SHA1 Hash of commit to reward
     pub commit: Option<Oid>,
+    /// Token URI of proof to sign 
+    pub token_uri: Option<String>,
     /// RPC url
     pub rpc_url: Option<String>,
+}
+
+pub fn create_structs(repo: &Repository, selected_commit: &Oid) -> anyhow::Result<(Puzzle, Proof)> {
+    let note = repo.find_note(Some(NOTES_REF), *selected_commit)?;
+    log::debug!("Selected note: {:?}", note.id());
+
+    let note = match note.message() {
+        Some(proof) => proof,
+        None => bail!("Not able to obtain commit message"),
+    };
+
+    let proof: Proof = serde_json::from_str(note)?;
+    log::debug!("Retrieved Proof: {:?}", proof);
+
+    let puzzle = Puzzle {
+        org: proof.org.clone(),
+        contributor: proof.contributor.clone(),
+        commit: proof.commit.clone(),
+        project: proof.project.clone(),
+        uri: proof.uri.clone(),
+    };
+
+    Ok((puzzle, proof))
+}
+
+pub fn select_commit(commits: &Vec<Oid>) -> anyhow::Result<Oid> {
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .items(commits)
+        .with_prompt("Claimable Commits")
+        .interact_on_opt(&Term::stderr())?;
+
+    let index = match selection {
+        Some(index) => index,
+        None => bail!("User did not select any commit"),
+    };
+
+    Ok(commits[index])
+}
+
+pub fn get_eligible_commits(signer_address: Address, repo: &Repository) -> anyhow::Result<Vec<Oid>> {
+    let mut commits: Vec<Oid> = Vec::new();
+
+    for note in repo.notes(Some(NOTES_REF))? {
+        let oids = note?;
+        let note = repo.find_note(Some(NOTES_REF), oids.1)?;
+        let message = note.message().unwrap();
+        let t: Proof = serde_json::from_str(message)?;
+        if signer_address == t.contributor {
+            commits.push(oids.1);
+        }
+    }
+
+    Ok(commits)
 }

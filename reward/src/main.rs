@@ -24,6 +24,7 @@ fn parse_options() -> anyhow::Result<Command> {
     let mut repo: Option<PathBuf> = None;
     let mut contributor: Option<H160> = None;
     let mut project: Option<String> = None;
+    let mut token_uri: Option<String> = None;
     let mut ledger_hdpath: Option<DerivationPath> = None;
     let mut keystore: Option<PathBuf> = None;
     let mut commit: Option<Oid> = None;
@@ -39,6 +40,7 @@ fn parse_options() -> anyhow::Result<Command> {
                         contributor,
                         repo,
                         project,
+                        token_uri,
                         ledger_hdpath,
                         keystore,
                         commit,
@@ -54,6 +56,7 @@ fn parse_options() -> anyhow::Result<Command> {
                         contributor,
                         repo,
                         project,
+                        token_uri: None,
                         ledger_hdpath: None,
                         keystore: None,
                         commit: None,
@@ -69,6 +72,7 @@ fn parse_options() -> anyhow::Result<Command> {
                         contributor,
                         repo,
                         project,
+                        token_uri,
                         ledger_hdpath,
                         keystore,
                         commit,
@@ -88,6 +92,9 @@ fn parse_options() -> anyhow::Result<Command> {
             }
             Long("project") => {
                 project = Some(parser.value()?.parse()?);
+            }
+            Long("token-uri") => {
+                token_uri = Some(parser.value()?.parse()?);
             }
             Long("commit") => {
                 commit = Some(parser.value()?.parse()?);
