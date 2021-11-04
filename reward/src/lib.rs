@@ -169,46 +169,6 @@ pub async fn claim_with_ledger(
     Ok(())
 }
 
-/// Creates a revwalk over the git repo
-/// Starting from the head iterates over all commits backwards, filtering out the ones that already have contribution notes
-/// Printing out a summary of all the commits which have no rewards defined
-pub fn discover(options: Options) -> anyhow::Result<()> {
-    let repo_path = options
-        .repo
-        .ok_or_else(|| anyhow!(Error::ArgMissing("No repo path specified".into())))?;
-
-    let repo = match Repository::open(repo_path) {
-        Ok(repo) => repo,
-        Err(e) => panic!("failed to open repo {}", e),
-    };
-    let head = repo.head()?;
-    let target = match head.target() {
-        Some(oid) => oid,
-        None => bail!("Not able to find HEAD"),
-    };
-
-    let mut walk = repo.revwalk()?;
-    walk.push(target)?;
-
-    let oids: Vec<Oid> = walk
-        .by_ref()
-        .filter(|r| -> bool {
-            let oid = r
-                .as_ref()
-                .map_err(|_| anyhow!(Error::CommitNotExisting))
-                .expect("Not able to map error");
-            repo.find_note(Some(NOTES_REF), *oid).is_err()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    println!("{}", "Commits without existing puzzles".bold());
-    for oid in oids {
-        let commit = format_commit(&repo, &oid)?;
-        println!("{} {}", commit.0, commit.1);
-    }
-    Ok(())
-}
-
 /// Opens the repo checks if the passed commit exists on the repo
 /// With the commit hash and other params,creates the message
 /// The message is getting signed with a Ledger HW or a keystore file.
@@ -286,14 +246,6 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn format_commit(repo: &Repository, oid: &Oid) -> anyhow::Result<(String, String)> {
-    let commit = repo.find_commit(*oid)?;
-    let summary = commit
-        .summary()
-        .ok_or_else(|| anyhow!(Error::NotValidEncoding("commit summary".into())))?;
-    Ok((oid.to_string()[..7].into(), summary.into()))
-}
-
 fn get_keystore(keystore: &Path) -> anyhow::Result<Wallet<SigningKey>> {
     let prompt = format!("{} Password: ", "??".cyan());
     let password = rpassword::prompt_password_stdout(&prompt)?;
@@ -364,6 +316,59 @@ fn convert_hex_to_fixed_bytes32(input: String) -> anyhow::Result<H256> {
     Ok(H256::from_slice(&vec))
 }
 
+pub fn create_structs(repo: &Repository, selected_commit: &Oid) -> anyhow::Result<(Puzzle, Proof)> {
+    let note = repo.find_note(Some(NOTES_REF), *selected_commit)?;
+    log::debug!("Selected note: {:?}", note.id());
+
+    let note = match note.message() {
+        Some(proof) => proof,
+        None => bail!("Not able to obtain commit message"),
+    };
+
+    let proof: Proof = serde_json::from_str(note)?;
+    log::debug!("Retrieved Proof: {:?}", proof);
+
+    let puzzle = Puzzle {
+        org: proof.org.clone(),
+        contributor: proof.contributor.clone(),
+        commit: proof.commit.clone(),
+        project: proof.project.clone(),
+        uri: proof.uri.clone(),
+    };
+
+    Ok((puzzle, proof))
+}
+
+pub fn select_commit(commits: &Vec<Oid>) -> anyhow::Result<Oid> {
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .items(commits)
+        .with_prompt("Claimable Commits")
+        .interact_on_opt(&Term::stderr())?;
+
+    let index = match selection {
+        Some(index) => index,
+        None => bail!("User did not select any commit"),
+    };
+
+    Ok(commits[index])
+}
+
+pub fn get_eligible_commits(signer_address: Address, repo: &Repository) -> anyhow::Result<Vec<Oid>> {
+    let mut commits: Vec<Oid> = Vec::new();
+
+    for note in repo.notes(Some(NOTES_REF))? {
+        let oids = note?;
+        let note = repo.find_note(Some(NOTES_REF), oids.1)?;
+        let message = note.message().unwrap();
+        let t: Proof = serde_json::from_str(message)?;
+        if signer_address == t.contributor {
+            commits.push(oids.1);
+        }
+    }
+
+    Ok(commits)
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// No wallet specified.
@@ -416,57 +421,4 @@ pub struct Options {
     pub token_uri: Option<String>,
     /// RPC url
     pub rpc_url: Option<String>,
-}
-
-pub fn create_structs(repo: &Repository, selected_commit: &Oid) -> anyhow::Result<(Puzzle, Proof)> {
-    let note = repo.find_note(Some(NOTES_REF), *selected_commit)?;
-    log::debug!("Selected note: {:?}", note.id());
-
-    let note = match note.message() {
-        Some(proof) => proof,
-        None => bail!("Not able to obtain commit message"),
-    };
-
-    let proof: Proof = serde_json::from_str(note)?;
-    log::debug!("Retrieved Proof: {:?}", proof);
-
-    let puzzle = Puzzle {
-        org: proof.org.clone(),
-        contributor: proof.contributor.clone(),
-        commit: proof.commit.clone(),
-        project: proof.project.clone(),
-        uri: proof.uri.clone(),
-    };
-
-    Ok((puzzle, proof))
-}
-
-pub fn select_commit(commits: &Vec<Oid>) -> anyhow::Result<Oid> {
-    let selection = Select::with_theme(&ColorfulTheme::default())
-        .items(commits)
-        .with_prompt("Claimable Commits")
-        .interact_on_opt(&Term::stderr())?;
-
-    let index = match selection {
-        Some(index) => index,
-        None => bail!("User did not select any commit"),
-    };
-
-    Ok(commits[index])
-}
-
-pub fn get_eligible_commits(signer_address: Address, repo: &Repository) -> anyhow::Result<Vec<Oid>> {
-    let mut commits: Vec<Oid> = Vec::new();
-
-    for note in repo.notes(Some(NOTES_REF))? {
-        let oids = note?;
-        let note = repo.find_note(Some(NOTES_REF), oids.1)?;
-        let message = note.message().unwrap();
-        let t: Proof = serde_json::from_str(message)?;
-        if signer_address == t.contributor {
-            commits.push(oids.1);
-        }
-    }
-
-    Ok(commits)
 }

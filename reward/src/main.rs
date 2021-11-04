@@ -12,7 +12,6 @@ const NAME: &str = env!("CARGO_CRATE_NAME");
 enum Command {
     Create { options: Options, verbose: bool },
     Claim { options: Options, verbose: bool },
-    Discover { options: Options, verbose: bool },
     Help,
 }
 
@@ -48,22 +47,6 @@ fn parse_options() -> anyhow::Result<Command> {
                     },
                     verbose,
                 });
-            }
-            Long("discover") => {
-                return Ok(Command::Discover {
-                    options: Options {
-                        org,
-                        contributor,
-                        repo,
-                        project,
-                        token_uri: None,
-                        ledger_hdpath: None,
-                        keystore: None,
-                        commit: None,
-                        rpc_url: None,
-                    },
-                    verbose,
-                })
             }
             Long("create") => {
                 return Ok(Command::Create {
@@ -154,11 +137,6 @@ async fn execute() -> anyhow::Result<()> {
         Command::Create { options, verbose } => {
             set_debug_level(verbose);
             create(options).await?;
-            Ok(())
-        }
-        Command::Discover { options, verbose } => {
-            set_debug_level(verbose);
-            discover(options)?;
             Ok(())
         }
     }
