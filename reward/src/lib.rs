@@ -10,7 +10,10 @@ use ethers::{
     prelude::{SignerMiddleware, Wallet},
     providers::{Http, Provider},
     signers::{HDPath, Ledger, Signer},
-    types::{transaction::eip712::Eip712, Address, H256},
+    types::{
+        transaction::{eip2718::TypedTransaction, eip712::Eip712},
+        Address, Signature, H256,
+    },
 };
 use git2::{Oid, Repository};
 use std::{
@@ -57,7 +60,11 @@ pub struct Proof {
     s: [u8; 32],
 }
 
+/// Claim the reward from the provided options;
 pub async fn claim(options: Options) -> anyhow::Result<()> {
+    // get the signer from the options passed in
+    let signer = SignerType::from_options(&options).await?;
+
     let repo_path = options
         .repo
         .ok_or_else(|| anyhow!(Error::ArgMissing("No repo path specified".into())))?;
@@ -72,18 +79,8 @@ pub async fn claim(options: Options) -> anyhow::Result<()> {
     let provider =
         Provider::<Http>::try_from(rpc_url).expect("could not instantiate HTTP Provider");
 
-    if let Some(keypath) = &options.keystore {
-        let signer = get_keystore(keypath)?;
-        claim_with_signer(signer, repo, provider).await?;
-    } else if let Some(path) = &options.ledger_hdpath {
-        let signer = get_ledger(path).await?;
-        claim_with_signer(signer, repo, provider).await?;
-    } else {
-        return Err(anyhow!(Error::ArgMissing(
-            "no wallet specified: either '--ledger-hdpath' or '--keystore' must be specified"
-                .into()
-        )));
-    }
+    // Claim with signer
+    claim_with_signer(signer, repo, provider).await?;
 
     Ok(())
 }
@@ -133,7 +130,8 @@ pub async fn claim_with_signer<S: 'static + Signer>(
 /// The message is getting signed with a Ledger HW or a keystore file.
 /// And stored as a git note on the specified commit
 pub async fn create(options: Options) -> anyhow::Result<()> {
-    let msg;
+    let signer = SignerType::from_options(&options).await?;
+
     let oid = options
         .commit
         .ok_or_else(|| anyhow!(Error::ArgMissing("No commit specified".into())))?;
@@ -161,34 +159,15 @@ pub async fn create(options: Options) -> anyhow::Result<()> {
         .find_commit(oid)
         .map_err(|_| anyhow!(Error::CommitNotExisting))?;
 
-    if let Some(keypath) = &options.keystore {
-        let signer = get_keystore(keypath)?;
-        msg = create_puzzle(
-            signer,
-            org,
-            contributor,
-            commit.id().to_string(),
-            &project,
-            &token_uri,
-        )
-        .await?;
-    } else if let Some(path) = &options.ledger_hdpath {
-        let signer = get_ledger(path).await?;
-        msg = create_puzzle(
-            signer,
-            org,
-            contributor,
-            commit.id().to_string(),
-            &project,
-            &token_uri,
-        )
-        .await?;
-    } else {
-        return Err(anyhow!(Error::ArgMissing(
-            "no wallet specified: either '--ledger-hdpath' or '--keystore' must be specified"
-                .into()
-        )));
-    }
+    let msg = create_puzzle(
+        signer,
+        org,
+        contributor,
+        commit.id().to_string(),
+        &project,
+        &token_uri,
+    )
+    .await?;
 
     let repo_sig = repo.signature()?;
     repo.note(
@@ -360,6 +339,12 @@ pub enum Error {
     /// GPG signature failed
     #[error("{0}")]
     GPGSigFailed(String),
+    /// Ledger Signer Error
+    #[error(transparent)]
+    Ledger(#[from] ethers::prelude::LedgerError),
+    /// Ethers Wallet Error
+    #[error(transparent)]
+    Wallet(#[from] ethers::prelude::WalletError),
 }
 
 /// The options allowed to be provided to the CLI
@@ -385,9 +370,92 @@ pub struct Options {
     pub rpc_url: Option<String>,
 }
 
+#[derive(Debug)]
 /// Signers that already implement the Signer trait
 pub enum SignerType {
     Keystore(Wallet<SigningKey>),
     Ledger(Ledger),
-    Unsupported
+    Unsupported,
+}
+
+impl SignerType {
+    async fn from_options(options: &Options) -> anyhow::Result<Self> {
+        if let Some(keypath) = &options.keystore {
+            Ok(Self::Keystore(get_keystore(keypath)?))
+        } else if let Some(path) = &options.ledger_hdpath {
+            Ok(Self::Ledger(get_ledger(path).await?))
+        } else {
+            Err(anyhow!(Error::ArgMissing(
+                "no wallet specified: either '--ledger-hdpath' or '--keystore' must be specified"
+                    .into()
+            )))
+        }
+    }
+}
+
+/// Implement Signer trait for SignerType to handle various signing sources.
+#[async_trait::async_trait]
+impl Signer for SignerType {
+    type Error = Error;
+
+    /// Signs a message with the signer.
+    async fn sign_message<S: Send + Sync + AsRef<[u8]>>(
+        &self,
+        message: S,
+    ) -> Result<Signature, Self::Error> {
+        match self {
+            SignerType::Keystore(wallet) => Ok(wallet.sign_message(message).await?),
+            SignerType::Ledger(ledger) => Ok(ledger.sign_message(message).await?),
+            SignerType::Unsupported => Err(Error::SignFailure),
+        }
+    }
+
+    /// Signs the transaction
+    async fn sign_transaction(&self, message: &TypedTransaction) -> Result<Signature, Self::Error> {
+        match self {
+            SignerType::Keystore(wallet) => Ok(wallet.sign_transaction(message).await?),
+            SignerType::Ledger(ledger) => Ok(ledger.sign_transaction(message).await?),
+            SignerType::Unsupported => Err(Error::SignFailure),
+        }
+    }
+
+    /// Encodes and signs the typed data according EIP-712.
+    /// Payload must implement Eip712 trait.
+    async fn sign_typed_data<T: Eip712 + Send + Sync>(
+        &self,
+        payload: &T,
+    ) -> Result<Signature, Self::Error> {
+        match self {
+            SignerType::Keystore(wallet) => Ok(wallet.sign_typed_data(payload).await?),
+            SignerType::Ledger(ledger) => Ok(ledger.sign_typed_data(payload).await?),
+            SignerType::Unsupported => Err(Error::SignFailure),
+        }
+    }
+
+    /// Returns the signer's Ethereum Address
+    fn address(&self) -> Address {
+        match self {
+            SignerType::Keystore(wallet) => wallet.address(),
+            SignerType::Ledger(ledger) => ledger.address(),
+            SignerType::Unsupported => Address::zero(),
+        }
+    }
+
+    /// Returns the signer's chain id
+    fn chain_id(&self) -> u64 {
+        match self {
+            SignerType::Keystore(wallet) => wallet.chain_id(),
+            SignerType::Ledger(ledger) => ledger.chain_id(),
+            SignerType::Unsupported => 0,
+        }
+    }
+
+    /// Sets the signer's chain id
+    fn with_chain_id<T: Into<u64>>(self, chain_id: T) -> Self {
+        match self {
+            SignerType::Keystore(wallet) => SignerType::Keystore(wallet.with_chain_id(chain_id)),
+            SignerType::Ledger(ledger) => SignerType::Ledger(ledger.with_chain_id(chain_id)),
+            SignerType::Unsupported => SignerType::Unsupported,
+        }
+    }
 }

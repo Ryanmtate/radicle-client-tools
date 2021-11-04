@@ -24,3 +24,4 @@ serde = { version = "1.0", features = ["derive"] }
 hex = "0.4.3"
 zbase32 = "0.1.2"
 serde_bytes = "0.11.5"
+async-trait = "0.1.51"

@@ -3945,6 +3945,7 @@ name = "reward"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "coins-bip32",
  "colored",
  "console",
