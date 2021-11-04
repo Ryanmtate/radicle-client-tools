@@ -329,17 +329,17 @@ pub fn create_structs(repo: &Repository, selected_commit: &Oid) -> anyhow::Resul
     log::debug!("Retrieved Proof: {:?}", proof);
 
     let puzzle = Puzzle {
-        org: proof.org.clone(),
-        contributor: proof.contributor.clone(),
-        commit: proof.commit.clone(),
-        project: proof.project.clone(),
+        org: proof.org,
+        contributor: proof.contributor,
+        commit: proof.commit,
+        project: proof.project,
         uri: proof.uri.clone(),
     };
 
     Ok((puzzle, proof))
 }
 
-pub fn select_commit(commits: &Vec<Oid>) -> anyhow::Result<Oid> {
+pub fn select_commit(commits: &[Oid]) -> anyhow::Result<Oid> {
     let selection = Select::with_theme(&ColorfulTheme::default())
         .items(commits)
         .with_prompt("Claimable Commits")
@@ -353,7 +353,10 @@ pub fn select_commit(commits: &Vec<Oid>) -> anyhow::Result<Oid> {
     Ok(commits[index])
 }
 
-pub fn get_eligible_commits(signer_address: Address, repo: &Repository) -> anyhow::Result<Vec<Oid>> {
+pub fn get_eligible_commits(
+    signer_address: Address,
+    repo: &Repository,
+) -> anyhow::Result<Vec<Oid>> {
     let mut commits: Vec<Oid> = Vec::new();
 
     for note in repo.notes(Some(NOTES_REF))? {
@@ -417,7 +420,7 @@ pub struct Options {
     pub keystore: Option<PathBuf>,
     /// SHA1 Hash of commit to reward
     pub commit: Option<Oid>,
-    /// Token URI of proof to sign 
+    /// Token URI of proof to sign
     pub token_uri: Option<String>,
     /// RPC url
     pub rpc_url: Option<String>,

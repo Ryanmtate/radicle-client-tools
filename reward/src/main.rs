@@ -3,7 +3,7 @@ use coins_bip32::path::DerivationPath;
 use ethers::types::H160;
 use git2::Oid;
 use radicle_tools::logger;
-use reward::{claim, create, discover, Options};
+use reward::{claim, create, Options};
 use std::{env, io::Write, path::PathBuf, process};
 
 const USAGE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/", "USAGE"));
