@@ -10,7 +10,7 @@ anyhow = { version = "*" }
 dialoguer = "0.8.0"
 console = "0.14.1"
 git2 = "0.13"
-ethers = { version = "0.5", features = ["ledger", "eip712"] }
+ethers = { git = "https://github.com/gakonst/ethers-rs", rev = "ef9b3988ce2f0b4f4fc100513cb9c15ab6568885", features = ["eip712","ledger"] }
 lexopt = { version = "0.1" }
 coins-bip32 = { version = "*" }
 rpassword = { version = "5.0" }
@@ -23,6 +23,4 @@ serde_json = { version = "1" }
 serde = { version = "1.0", features = ["derive"] }
 hex = "0.4.3"
 zbase32 = "0.1.2"
-ethers-derive-eip712 = { git = 'https://github.com/ryanmtate/ethers-rs', branch = 'feature/derive-eip712' }
-ethers-core = { path = "../../ethers-rs/ethers-core" }
 serde_bytes = "0.11.5"
