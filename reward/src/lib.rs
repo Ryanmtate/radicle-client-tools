@@ -73,9 +73,11 @@ pub async fn claim(options: Options) -> anyhow::Result<()> {
         Provider::<Http>::try_from(rpc_url).expect("could not instantiate HTTP Provider");
 
     if let Some(keypath) = &options.keystore {
-        claim_with_keystore(keypath, repo, provider).await?;
+        let signer = get_keystore(keypath)?;
+        claim_with_signer(signer, repo, provider).await?;
     } else if let Some(path) = &options.ledger_hdpath {
-        claim_with_ledger(path, repo, provider).await?;
+        let signer = get_ledger(path).await?;
+        claim_with_signer(signer, repo, provider).await?;
     } else {
         return Err(anyhow!(Error::ArgMissing(
             "no wallet specified: either '--ledger-hdpath' or '--keystore' must be specified"
@@ -86,54 +88,11 @@ pub async fn claim(options: Options) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn claim_with_keystore(
-    keypath: &Path,
+pub async fn claim_with_signer<S: 'static + Signer>(
+    signer: S,
     repo: Repository,
     provider: Provider<Http>,
 ) -> anyhow::Result<()> {
-    let signer = get_keystore(keypath)?;
-
-    let commits = get_eligible_commits(signer.address(), &repo)?;
-    let selected_commit = select_commit(&commits)?;
-    log::debug!("Selected commit: {:?}", selected_commit);
-
-    let (puzzle, proof) = create_structs(&repo, &selected_commit)?;
-    log::debug!("Parsed Puzzle: {:?}", puzzle);
-
-    let signer = SignerMiddleware::new(provider, signer);
-    let abi: Abi = serde_json::from_str(REWARD_ABI)?;
-    let contract = Contract::new(REWARD_CONTRACT.parse::<Address>().unwrap(), abi, signer);
-
-    let call = contract.method::<_, bool>("claimRewardEOA", (puzzle, proof.v, proof.r, proof.s))?;
-
-    let result = loop {
-        let pending = call.send().await?;
-        let tx_hash = *pending;
-
-        log::info!("Waiting for transaction {:?} to be included..", tx_hash);
-
-        if let Some(result) = pending.await? {
-            break result;
-        } else {
-            log::info!("Transaction {} dropped, retrying..", tx_hash);
-        }
-    };
-
-    log::info!(
-        "Reward successfully minted in block #{} ({})",
-        result.block_number.unwrap(),
-        result.block_hash.unwrap(),
-    );
-
-    Ok(())
-}
-
-pub async fn claim_with_ledger(
-    path: &DerivationPath,
-    repo: Repository,
-    provider: Provider<Http>,
-) -> anyhow::Result<()> {
-    let signer = get_ledger(path).await?;
     let commits = get_eligible_commits(signer.address(), &repo)?;
     let selected_commit = select_commit(&commits)?;
     log::debug!("Selected commit: {:?}", selected_commit);
@@ -424,4 +383,11 @@ pub struct Options {
     pub token_uri: Option<String>,
     /// RPC url
     pub rpc_url: Option<String>,
+}
+
+/// Signers that already implement the Signer trait
+pub enum SignerType {
+    Keystore(Wallet<SigningKey>),
+    Ledger(Ledger),
+    Unsupported
 }
